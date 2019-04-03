@@ -167,6 +167,7 @@ class USBCat(functionfs.Function):
         # be even one event to process.
         self._aio_context.getEvents(0)
 
+
     def _onReceived(self, block, res, res2):
         if res != -errno.ESHUTDOWN:
             # XXX: is it good to resubmit on any other error ?
@@ -174,8 +175,27 @@ class USBCat(functionfs.Function):
         if res < 0:
             trace('aio read completion error:', -res)
         else:
-            trace('aio read completion received', res, 'bytes')
-            self._writer(block.buffer_list[0][:res])
+            trace('aio read completion received changes', res, 'bytes')
+            self.handleReceiveMessage(block.buffer_list[0][:res])
+
+    def handleReceiveMessage(self,value):
+        print("handleReceiveMessage")
+        print(value)
+        print(type(value))
+        string_val = str(value.decode("utf-8"))
+        print(string_val)
+        print(type(string_val))
+        if string_val.isdigit():
+            size = len(string_val)
+            size_bytes = [
+            (size & 0x0000ff00) >> 8,
+            (size & 0x000000ff)]
+            print(size_bytes);
+            self.write(size_bytes)
+            self.write(string_val)
+        else:
+            trace('Value is not digit')
+
 
     def _onCanSend(self, block, res, res2):
         if res < 0:
@@ -212,6 +232,12 @@ class USBCat(functionfs.Function):
         if len(self._aio_send_block_list) == MAX_PENDING_WRITE_COUNT:
             self._onCannotSend()
 
+
+def receiveMessage(message):
+    print("Received message");
+    print(message)
+
+
 def main(path):
     epoll = select.epoll(3)
     def sender():
@@ -232,7 +258,8 @@ def main(path):
         event_dispatcher_dict[file_object.fileno()] = handler
     with USBCat(
         path,
-        sys.stdout.write,
+        # sys.stdout.write,
+        receiveMessage,
         onCanSend=lambda: epoll.register(sys.stdin, select.EPOLLIN),
         onCannotSend=stopSender,
     ) as function:
