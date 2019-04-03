@@ -24,6 +24,10 @@ import sys
 import functionfs
 import functionfs.ch9
 import libaio
+import binascii
+import socket
+import time
+from threading import Thread
 
 # More than one, so we may process one while kernel fills the other.
 PENDING_READ_COUNT = 2
@@ -43,6 +47,10 @@ def noIntr(func):
 
 class USBCat(functionfs.Function):
     _enabled = False
+    _aaUsbCompleted = False
+    _aaLocalCompleted = False
+    _socket = None
+    _readBuffer = bytearray(b" " * 16384) 
 
     def __init__(self, path, writer, onCanSend, onCannotSend):
         self._aio_context = libaio.AIOContext(
@@ -128,6 +136,8 @@ class USBCat(functionfs.Function):
         self._aio_context.submit(self._aio_recv_block_list)
         self._real_onCanSend()
         self._enabled = True
+        thread = Thread(target = self.runAAtcpConnection, args = ())
+        thread.start()
 
     def onDisable(self):
         trace('onDisable')
@@ -153,13 +163,14 @@ class USBCat(functionfs.Function):
             if has_cancelled:
                 noIntr(functools.partial(self._aio_context.getEvents, min_nr=None))
             self._enabled = False
+            self._socket.close()
 
     def onAIOCompletion(self):
         """
         Call when eventfd notified events are available.
         """
         event_count = self.eventfd.read()
-        trace('eventfd reports %i events' % event_count)
+        # trace('eventfd reports %i events' % event_count)
         # Even though eventfd signaled activity, even though it may give us
         # some number of pending events, some events seem to have been already
         # processed (maybe during io_cancel call ?).
@@ -179,23 +190,125 @@ class USBCat(functionfs.Function):
             self.handleReceiveMessage(block.buffer_list[0][:res])
 
     def handleReceiveMessage(self,value):
-        print("handleReceiveMessage")
-        print(value)
-        print(type(value))
-        string_val = str(value.decode("utf-8"))
-        print(string_val)
-        print(type(string_val))
-        if string_val.isdigit():
-            size = len(string_val)
-            size_bytes = [
-            (size & 0x0000ff00) >> 8,
-            (size & 0x000000ff)]
-            print(size_bytes);
-            self.write(size_bytes)
-            self.write(string_val)
-        else:
-            trace('Value is not digit')
+        self.handleAAMessage(value)
+        # if self._aaLocalCompleted != True:
+        #     self._aaLocalCompleted = True;
+        #     while not self._aaUsbCompleted:
+        #         print("Waiting for USB connection")
+        #         time.sleep(1)
+        # print("handleReceiveMessage")
+        # print(value)
+        # print(binascii.hexlify(value))
+        # print(type(value))
+        # string_val = str(value.decode("utf-8"))
+        # print(string_val)
+        # print(type(string_val))
+        # if string_val.isdigit():
+        #     size = len(string_val)
+        #     size_bytes = [
+        #     (size & 0x0000ff00) >> 8,
+        #     (size & 0x000000ff)]
+        #     print(size_bytes);
+        #     self.write(size_bytes)
+        #     self.write(string_val)
+        # else:
+        #     trace('Value is not digit')
 
+    def runAAtcpConnectionStub(self):
+        print("TCPflowStub", "runAAtcpConnection")
+        self._aaLocalCompleted = True
+
+    def printData(self,tag, data):
+        try:
+            copy_data = data;
+            print(tag,"Size: ",len(copy_data),"; Value: ", binascii.hexlify(copy_data))
+        except:
+            print("Error in printData")
+        
+
+    def runAAtcpConnection(self):
+        print("TCPflow", "runAAtcpConnection")
+        
+        while self._enabled:
+            # ip_address = '192.168.0.107' # A1
+            ip_address = '192.168.0.106' # A2
+            # ip_address = '192.168.0.162' # Nexus5
+            port = 5277
+            if self._aaLocalCompleted != True:
+                print("TCPflow", "Before connection to device")
+                self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._socket.connect((ip_address, port))
+                print("TCPflow", "After connection to device", ip_address,":",port)
+                self._socket.sendall(bytearray([0, 3, 0, 6, 0, 1, 0, 1, 0, 2]))
+                print("TCPflow", "After send special array")
+                data = self._socket.recv(12)
+                print("Connected to ",ip_address,":",port," and send init value")
+                self.printData("TCPflow", data)
+                self._aaLocalCompleted = True;
+                
+            while not self._aaUsbCompleted:
+                print("TCPflow","Waiting for USB connection")
+                time.sleep(1)
+
+
+            # int enc_len;
+            # socketinput.readFully(readbuffer, 0, 4);
+            # int pos = 4;
+            # enc_len = (readbuffer[2] & 0xFF) << 8 | (readbuffer[3] & 0xFF);
+            # if ((int) readbuffer[1] == 9)   //Flag 9 means the header is 8 bytes long (read it in a separate byte array)
+            # {
+            #     pos += 4;
+            #     socketinput.readFully(readbuffer, 4, 4);
+            # }
+
+            # socketinput.readFully(readbuffer, pos, enc_len);
+            # phoneOutputStream.write(Arrays.copyOf(readbuffer, enc_len + pos));
+
+            print("TCPflow","Before read 4 bytes from socket")
+            first_4_data = bytearray(self._socket.recv(4));
+            # self._readBuffer = bytearray(first_4_data)
+            print("TCPflow", first_4_data)
+            # print("TCPflow", self._readBuffer[0:4]);
+            # self.printData("TCPflow", self._readBuffer[0:4])
+
+            pos = 4
+            enc_len = (first_4_data[2] & 0xFF << 8) | (first_4_data[3] & 0xFF)
+            if data[1] == 9:
+                print("TCPflow", "data[1] == 9")
+                pos += 4
+                # self._socket.recv_into(self._readBuffer, 4, 4)
+                data = self._socket.recv(4);
+                first_4_data = first_4_data + bytearray(data)
+
+
+            print("TCPflow", "Pos: ", pos, "; Len: ", enc_len)
+            print("Before read final data");
+            data = self._socket.recv(enc_len-pos);
+            self.printData("TCPflow", bytearray(data))
+
+            finalMessage = first_4_data + bytearray(data)
+            print("TCPflow", "Final MESSAGE:")
+            self.printData("TCPflow", finalMessage)
+
+            self.write(finalMessage)
+            # self._socket.close()
+
+            
+    def handleAAMessage(self, value):
+        print("USBflow","handleReceiveMessage")
+        self.printData("USBflow", value)
+        if self._aaUsbCompleted != True:
+            print("USBflow","Write AA combination")
+            self.write([0, 3, 0, 8, 0, 2, 0, 1, 0, 4, 0, 0])
+            self._aaUsbCompleted = True
+            return
+        
+        while not self._aaLocalCompleted:
+            print("Waiting for TCP connection")
+            time.sleep(1)
+
+        print("USBflow","Send to socket")
+        self._socket.sendall(bytearray(value))
 
     def _onCanSend(self, block, res, res2):
         if res < 0:
@@ -273,10 +386,19 @@ def main(path):
         try:
             while True:
                 for fd, event in noIntr(epoll.poll):
-                    trace('epoll: fd %r got event %r' % (fd, event))
+                    # trace('epoll: fd %r got event %r' % (fd, event))
                     event_dispatcher_dict[fd]()
         except (KeyboardInterrupt, EOFError):
             pass
 
+# def run_aa_socket_connection():
+#     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+#     s.connect(('192.168.0.107', 5277))
+#     s.sendall(bytearray([0, 3, 0, 6, 0, 1, 0, 1, 0, 2]))
+#     data = s.recv(12)
+#     print(data)
+#     s.close()
+
 if __name__ == '__main__':
+    # run_aa_socket_connection()
     main(*sys.argv[1:])
